@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+    Petition API
+
+Parameters:
+  STAGE:
+    Type: String
+    Description: Stage for deployment.
+  DOMAIN:
+    Type: String
+    Description: Domain used for API
+
+Resources:
+    RestAPI:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: "Petition API"
+    Votes:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        ParentId: !GetAtt RestAPI.RootResourceId
+        PathPart: "votes"
+        RestApiId: !Ref RestAPI
+    OptionsMethod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        AuthorizationType: NONE
+        RestApiId:
+          Ref: RestAPI
+        ResourceId:
+          Ref: Votes
+        HttpMethod: OPTIONS
+        Integration:
+          IntegrationResponses:
+            - StatusCode: 200
+              ResponseParameters:
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+              ResponseTemplates:
+                application/json: ''
+          PassthroughBehavior: WHEN_NO_MATCH
+          RequestTemplates:
+            application/json: '{"statusCode": 200}'
+          Type: MOCK
+        MethodResponses:
+          - StatusCode: 200
+            ResponseModels:
+              application/json: 'Empty'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: false
+              method.response.header.Access-Control-Allow-Methods: false
+              method.response.header.Access-Control-Allow-Origin: false
+    GetVotesMethod:
+      Type: AWS::ApiGateway::Method
+      DependsOn:
+        - Votes
+      Properties:
+        HttpMethod: GET
+        ResourceId: !Ref Votes
+        RestApiId: !Ref RestAPI
+        AuthorizationType: NONE
+        MethodResponses:
+          - ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: true
+              method.response.header.Access-Control-Allow-Headers: true
+            StatusCode: 200
+        Integration:
+          Type: AWS
+          IntegrationHttpMethod: POST
+          Credentials:
+            Fn::GetAtt:
+              - DDBFullAccessRole
+              - Arn
+          Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/Scan"
+          RequestTemplates:
+            application/json: !Sub
+              - |
+                {
+                    "TableName": "${tableName}",
+                    "ConsistentRead": true
+                }
+              - tableName:
+                  !Ref VoteTable
+          IntegrationResponses:
+            - StatusCode: 200
+              ResponseParameters:
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+              ResponseTemplates:
+                application/json:
+                  Fn::Sub: |
+                    #set($inputRoot = $input.path('$'))
+                    {
+                      #foreach($elem in $inputRoot.Items)
+                        "$elem.Vote.S": "$elem.VoteCount.N"
+                        #if($foreach.hasNext),#end
+                      #end
+                    }
+            - StatusCode: 500
+    PutVoteMethod:
+      Type: AWS::ApiGateway::Method
+      DependsOn:
+        - Votes
+      Properties:
+        HttpMethod: POST
+        ResourceId: !Ref Votes
+        RestApiId: !Ref RestAPI
+        AuthorizationType: NONE
+        MethodResponses:
+          - ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: true
+              method.response.header.Access-Control-Allow-Headers: true
+            StatusCode: 200
+        Integration:
+          Type: AWS
+          IntegrationHttpMethod: POST
+          Credentials:
+            Fn::GetAtt:
+              - DDBFullAccessRole
+              - Arn
+          Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/UpdateItem"
+          RequestTemplates:
+            application/json: !Sub
+              - |
+                #if($input.path('$.vote')=="yes")
+                {
+                    "TableName": "petition-api-VoteTable-11EAXSDCT7J33",
+                    "Key": {"Vote": {"S": $input.json('$.vote')}},
+                    "UpdateExpression": "ADD VoteCount :num",
+                    "ExpressionAttributeValues": {
+                        ":num": {"N": "1"}
+                    },
+                    "ReturnValues" : "UPDATED_NEW"
+                }
+                #elseif($input.path('$.vote')=="no")
+                {
+                    "TableName": "petition-api-VoteTable-11EAXSDCT7J33",
+                    "Key": {"Vote": {"S": $input.json('$.vote')}},
+                    "UpdateExpression": "ADD VoteCount :num",
+                    "ExpressionAttributeValues": {
+                        ":num": {"N": "1"}
+                    },
+                    "ReturnValues" : "UPDATED_NEW"
+                }
+                #else
+                {}
+                #end
+              - tableName:
+                  !Ref VoteTable
+          IntegrationResponses:
+            - StatusCode: 200
+              ResponseParameters:
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+              ResponseTemplates:
+                application/json:
+                  Fn::Sub: |
+                    #set($inputRoot = $input.path('$'))
+                    #set($elem = $inputRoot.Attributes)
+                    {
+                      "VoteCount": "$elem.VoteCount.N"
+                    }
+            - StatusCode: 500
+
+    RestAPIdeployment:
+      Type: AWS::ApiGateway::Deployment
+      DependsOn:
+        - GetVotesMethod
+      Properties:
+        Description: "Prod Stage for "
+        StageDescription:
+          CacheClusterEnabled: true
+          CacheClusterSize: "0.5"
+          CacheDataEncrypted: false
+          CacheTtlInSeconds: 5
+          CachingEnabled: true
+          Description: String
+        RestApiId:
+          Ref: RestAPI
+        StageName: Prod
+
+    DDBFullAccessRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service:
+                  - "apigateway.amazonaws.com"
+              Action:
+                - "sts:AssumeRole"
+        Path: "/"
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+    APIDomainName:
+      Type: AWS::ApiGateway::DomainName
+      Properties:
+        CertificateArn: "arn:aws:acm:us-east-1:053954707544:certificate/698835ba-ec85-4f2f-aa77-3de9da34fda5"
+        DomainName:
+          Fn::Join:
+            - "."
+            - - !Ref STAGE
+              - !Ref DOMAIN
+    APIBasePathMapping:
+      Type: AWS::ApiGateway::BasePathMapping
+      Properties:
+        DomainName: !Ref APIDomainName
+        RestApiId: !Ref RestAPI
+        Stage: Prod
+    APIDomain:
+      Type: AWS::Route53::RecordSetGroup
+      Properties:
+        HostedZoneName:
+          Fn::Join:
+            - ""
+            - - !Ref DOMAIN
+              - "."
+        RecordSets:
+          - Name:
+              Fn::Join:
+                - "."
+                - - !Ref STAGE
+                  - !Ref DOMAIN
+            Type: A
+            AliasTarget:
+              DNSName: !GetAtt APIDomainName.DistributionDomainName
+              HostedZoneId: !GetAtt APIDomainName.DistributionHostedZoneId
+    VoteTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: "Vote"
+            AttributeType: "S"
+        KeySchema:
+          - AttributeName: "Vote"
+            KeyType: "HASH"
+        ProvisionedThroughput:
+          ReadCapacityUnits: "1"
+          WriteCapacityUnits: "1"
